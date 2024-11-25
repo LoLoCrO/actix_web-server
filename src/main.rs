@@ -3,17 +3,20 @@ extern crate diesel;
 
 use actix_web::{web, App, HttpResponse, HttpServer, Responder, Error};
 use actix_web::http::StatusCode;
+use actix_web::cookie::Cookie;
 use log::error;
 use env_logger;
 use std::fmt;
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
-use bcrypt::{hash, DEFAULT_COST};
+use bcrypt::{hash, verify, DEFAULT_COST};
+use jsonwebtoken::{encode, Header, EncodingKey};
+use chrono::{Utc};
 use actix_web::web::Data;
 use dotenv::dotenv;
 
 mod models;
-use crate::models::{User, UserInput};
+use crate::models::{User, UserInput, LoginInput, Claims};
 
 mod schema;
 use schema::users;
@@ -117,6 +120,49 @@ async fn create_user(pool: web::Data<r2d2::Pool<ConnectionManager<PgConnection>>
     Ok(HttpResponse::Ok().body("User created successfully"))
 }
 
+fn generate_jwt(username: &str) -> Result<String, CustomError> {
+    let expiration = Utc::now()
+        .checked_add_signed(chrono::Duration::days(1))
+        .expect("valid timestamp")
+        .timestamp();
+
+    let claims = Claims {
+        sub: username.to_owned(),
+        exp: expiration as usize,
+    };
+
+    let secret = std::env::var("jwt_secret").expect("jwt_secret must be set");
+    encode(&Header::default(), &claims, &EncodingKey::from_secret(secret.as_ref()))
+        .map_err(|_| CustomError::new("Failed to generate token", StatusCode::INTERNAL_SERVER_ERROR))
+}
+
+async fn login_user(pool: web::Data<r2d2::Pool<ConnectionManager<PgConnection>>>, user_data: web::Json<LoginInput>) -> Result<impl Responder, Error> {
+    let conn = pool.get().map_err(|_| CustomError::new("Failed to get database connection", StatusCode::INTERNAL_SERVER_ERROR))?;
+    let user_data = user_data.into_inner();
+
+    let user = users::table
+        .filter(users::username.eq(&user_data.username))
+        .first::<User>(&conn)
+        .map_err(|_| CustomError::new("Invalid username or password", StatusCode::UNAUTHORIZED))?;
+
+    let is_valid = verify(&user_data.password, &user.password)
+        .map_err(|_| CustomError::new("Failed to verify password", StatusCode::INTERNAL_SERVER_ERROR))?;
+
+    if is_valid {
+        let token = generate_jwt(&user.username)?;
+        let cookie = Cookie::build("auth-token", token)
+            .path("/")
+            .http_only(true)
+            .finish();
+
+        Ok(HttpResponse::Ok()
+            .cookie(cookie)
+            .body("Login successful")
+        )
+    } else {
+        Err(CustomError::new("Invalid username or password", StatusCode::UNAUTHORIZED).into())
+    }
+}
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -136,6 +182,7 @@ async fn main() -> std::io::Result<()> {
             // .route("/error-demo", web::get().to(error_demo))
             .route("/hash_password", web::post().to(hash_password))
             .route("/create_user", web::post().to(create_user))
+            .route("/login", web::post().to(login_user))
     })
     .bind("127.0.0.1:8080")?
     .run()

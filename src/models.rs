@@ -23,3 +23,15 @@ pub struct UserInput {
     pub username: String,
     pub password: String,
 }
+
+#[derive(Deserialize)]
+pub struct LoginInput {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Claims {
+    pub sub: String,
+    pub exp: usize,
+}
